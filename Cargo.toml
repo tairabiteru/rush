@@ -1,0 +1,14 @@
+[package]
+name = "rush"
+version = "0.1.0"
+authors = ["Taira <tylervitale@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+colored = "2"
+text_io = "0.1.8"
+term_size = "0.3.2"
+crossterm = "0.18.2"
+ansi-escapes = "0.1.0"
