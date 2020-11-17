@@ -19,4 +19,9 @@ Also I want to learn Rust. I learn by doing, not by watching someone else. So I'
 * What about cygwin?
     * Same problem.
 * Why don't you just run Linux?
-    * I'd love to! Unfortunately, I have applications that only run in a Windows environment. 
+    * I'd love to! Unfortunately, I have applications that only run in a Windows environment.
+* Why Rust?
+    * 'Cause it's fast, safe, and they've got a neat crab.
+    * Also I want to learn it.
+* Why did you do `<insert dumb code here>` when you could have done `<insert smarter code here>`?
+    * Because I'm bad at Rust - Did you even read the top?
