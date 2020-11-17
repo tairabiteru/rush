@@ -247,7 +247,8 @@ fn main() {
                     let files = cwd.read_dir().unwrap();
                     let mut matches: Vec<String> = Vec::new();
 
-                    // You know what? It's magic. It's fucking magic.
+                    // Imma be honest, I don't even remember how I made this work.
+                    // So have fun.
 
                     for file in files {
                         let file_ref = file.as_ref();
