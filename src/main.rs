@@ -1,67 +1,394 @@
 use std::process::{Command};
-use std::io::{stdout, Write, ErrorKind};
+use std::io;
+use std::io::{Write, ErrorKind};
 use std::env;
+use std::os::windows::prelude::*;
 use colored::*;
-use text_io::read;
-use std::path::{Path, PathBuf};
+use std::path::{Path, Component};
 use term_size;
 use ansi_escapes::*;
-use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent},
-    Result,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEvent};
 
 
-// clear the command line
-fn clear() {
-    Command::new("cmd").args(&["/C", "cls"]).status();
+// Obtain CWD as String without \\?\
+fn cwd_as_string() -> String {
+    let abs = env::current_dir().unwrap().canonicalize().unwrap();
+    let cwd = abs.into_os_string().into_string().unwrap();
+    return cwd.replace("\\\\?\\", "");
+}
+
+// Obtain %HOMEPATH%
+fn home_as_string() -> String {
+    let home = env::var("HOMEPATH").unwrap();
+    return home.replace("\\\\?\\", "");
 }
 
 
-// Change directories.
-fn cd(args: Vec<&str>) {
-    let dir;
-    let home = env::var("HOMEPATH").unwrap();
+// Turn a path into a linux path
+fn linuxize_path(directory: String) -> String {
+    let home = home_as_string().replace("\\", "/");
+    let mut output = directory.clone();
+    output = output.replace(&home, "~");
+    output = output.replace("\\", "/");
+    return output;
+}
 
-    if args[1] == "~" {
-        dir = Path::new(&home);
-    } else {
-        dir = Path::new(args[1]);
-    }
 
-    let result = env::set_current_dir(&dir);
-    let result = match result {
-        Ok(output) => output,
-        Err(error) => match error.kind() {
-            ErrorKind::NotFound => {
-                println!("Could not cd to \"{}\": Directory not found.", args[1]);
-            },
-            ErrorKind::PermissionDenied => {
-                println!("Could not cd to \"{}\": Access is denied.", args[1])
-            }
-            other => {
-                println!("Could not CD to \"{}\": {:?}", args[1], other);
+// Match files in a directory
+fn match_files(directory: String, hint: String) -> Vec<String> {
+    let mut matches: Vec<String> = Vec::new();
+    let dir = Path::new(&directory);
+    let files = match dir.read_dir() {
+        Ok(files) => files,
+        Err(error) => panic!("Could not obtain directory listing: {:?}", error),
+    };
+
+    for file in files {
+        if let Ok(file) = file {
+            let filename = file.file_name().into_string().unwrap();
+            if hint == "" {
+                matches.push(filename.clone());
+            } else if filename.starts_with(&hint) {
+                matches.push(filename.clone());
             }
         }
-    };
+    }
+    return matches;
 }
 
 
-// list directories
-fn ls(args: Vec<&str>) {
-    let mut term_width = 100;
-    if let Some((w, h)) = term_size::dimensions() {
-        term_width = w;
-    } else {
-        println!("Unable to obtain terminal size. Assuming 100.")
+// Emulate a """simple""" console.
+// (lol jk, there's no such thing)
+struct Console {
+    command: String,
+    cursor_pos: usize,
+    stdout: io::Stdout,
+    history: Vec<String>,
+    history_pos: usize,
+}
+
+
+impl Console {
+
+    // Initialize fields.
+    fn new() -> Self {
+        Console {
+            command: String::new(),
+            cursor_pos: 0,
+            stdout: io::stdout(),
+            history: vec![String::new()],
+            history_pos: 0,
+        }
     }
 
-    let cwd = match env::current_dir() {
-        Ok(cwd) => cwd,
-        Err(error) => return println!("Could not obtain current working directory: {:?}", error),
-    };
 
-    let files = match cwd.read_dir() {
+    // Clear out entire screen
+    fn clear(&self) {
+        Command::new("cmd").args(&["/C", "cls"]).status();
+    }
+
+
+    // DING A LING
+    fn bell(&mut self) {
+        print!("{}", Beep);
+        self.stdout.flush();
+    }
+
+
+    // Obtain terminal width
+    fn term_width(&self) -> usize {
+        let mut term_width = 100;
+        if let Some((w, _h)) = term_size::dimensions() {
+            term_width = w;
+        } else {
+            println!("Unable to obtain terminal size. Assuming 100.");
+        }
+        return term_width;
+    }
+
+
+    // Obtain user@host:dir$
+    fn get_prompt(&self) -> String {
+        let user = env::var("USERNAME").unwrap().to_lowercase();
+        let host = env::var("COMPUTERNAME").unwrap().to_lowercase();
+        let prompt = format!("{}@{}", user, host).bright_green().bold().to_string();
+
+        let dir = cwd_as_string();
+        let home = home_as_string();
+        let dir = dir.replace(&home, "~");
+        let dir = dir.replace("\\", "/");
+
+        return format!("{}:{}{} ", prompt, dir.bright_blue().bold(), "$".normal().clear());
+    }
+
+
+    // Called to render the contents of self.command to the console
+    fn render(&mut self) {
+        let back = (self.command.chars().count() - self.cursor_pos) as u16;
+        print!("{}{}", EraseLine, CursorLeft);
+        print!("{}{}", self.get_prompt(), self.command);
+        if back > 0 {
+            print!("{}", CursorBackward(back));
+        }
+        self.stdout.flush();
+    }
+
+
+    // Handle backspace keystroke
+    fn handle_backspace(&mut self) {
+        if self.cursor_pos <= 0 {
+            self.bell();
+        } else {
+            let (s1, s2) = self.command.split_at(self.cursor_pos);
+            let mut s1 = String::from(s1);
+            s1.pop();
+            self.command = format!("{}{}", s1, s2);
+            self.cursor_pos -= 1;
+            let hislen = self.history.len();
+            self.history[hislen-1] = self.command.clone();
+        }
+        self.render();
+    }
+
+
+    // Handle left arrow keystroke
+    fn handle_left(&mut self) {
+        if self.cursor_pos <= 0 {
+            self.bell();
+        } else {
+            print!("{}", CursorBackward(1));
+            self.cursor_pos -= 1;
+            self.stdout.flush();
+        }
+    }
+
+
+    // Handle right arrow keystroke
+    fn handle_right(&mut self) {
+        if self.cursor_pos >= self.command.chars().count() {
+            self.bell();
+        } else {
+            print!("{}", CursorForward(1));
+            self.cursor_pos += 1;
+            self.stdout.flush();
+        }
+    }
+
+
+    // Handle up arrow keystroke
+    fn handle_up(&mut self) {
+        if self.history_pos > 0 {
+            self.history_pos -= 1;
+            self.command = self.history[self.history_pos].clone();
+            self.cursor_pos = self.command.chars().count();
+            self.render();
+        } else {
+            self.bell();
+        }
+    }
+
+
+    // Handle down arrow keystroke
+    fn handle_down(&mut self) {
+        if self.history.len() <= 1 { return self.bell(); }
+        if self.history_pos < (self.history.len() - 1) {
+            self.history_pos += 1;
+            self.command = self.history[self.history_pos].clone();
+            self.cursor_pos = self.command.chars().count();
+            self.render();
+        } else {
+            self.bell()
+        }
+    }
+
+    // Handle tab keystroke
+    // Please don't look at this. It makes me want to cry.
+    fn handle_tab(&mut self) {
+
+        // I TOLD YOU NOT TO LOOK AT IT.
+
+        // Ugh, fine. So here we ding the bell if they've either entered nothing
+        // Or if the command contains no space. If it contains no space, then they
+        // are still typing the command.
+        if self.command == "" || !self.command.contains(" ") { return self.bell(); }
+
+        // We have to get the first index by the first space character.
+        // This is because paths can contain spaces too, so we can't split by spaces.
+        let fsi = self.command.chars().position(|c| c == ' ').unwrap();
+        let (command, a) = self.command.split_at(fsi);
+        let args = a.trim_start();
+        let dir;
+
+        // Please note: the rest of this was written by an idiot.
+
+        // Here, we replace ~ with the full home path.
+        if args.starts_with("~") {
+            let mut chars = args.chars();
+            chars.next();
+            dir = format!("{}{}", home_as_string(), chars.as_str());
+        } else {
+            dir = args.to_string();
+        }
+
+        // In short, this massive clusterfuck is responsible for iterating over path components
+        // and ensuring each step along the path is valid. If it's not, that is the value
+        // we want to try to predict.
+        let components: Vec<Component> = Path::new(&dir).components().collect();
+        let mut last_good = String::new();
+        let mut last_component = String::new();
+        let mut valid = true;
+
+        for component in components {
+            last_component = component.as_os_str().to_os_string().into_string().unwrap();
+            last_component = last_component.replace("\\", "/");
+            match component {
+                Component::RootDir => last_good = String::from("/"),
+                _ => {
+                    let test;
+                    if last_good.ends_with("/"){
+                        test = format!("{}{}", last_good, last_component);
+                    } else {
+                        test = format!("{}/{}", last_good, last_component);
+                    }
+
+                    if Path::new(&test).exists() {
+                        last_good = test.clone();
+                    } else {
+                        valid = false;
+                        break;
+                    }
+                }
+            }
+        }
+        let matches;
+
+        // If the whole path is valid, then the predictor needs to
+        // match all files in the directory, so we need to pass ""
+        if valid {
+            matches = match_files(last_good.clone(), String::new());
+
+        // Otherwise, try matching by the last component.
+        } else {
+            matches = match_files(last_good.clone(), last_component);
+        }
+
+        // If 0 matches, BEEP AT THEM.
+        if matches.len() == 0 {
+            self.bell();
+        // For now, if they get more than one match, we beep. But eventually ls will supplant this.
+        } else if matches.len() != 1 {
+            self.bell();
+        // If there's exactly one match, we've got work to do.
+        } else {
+            let mut autocompleted;
+            // If the dir already ends with /, we don't need to append a /.
+            // Also if there was no last known good one, it means we're at the root.
+            // So also don't append /.
+            if last_good.ends_with("/") || last_good == "" {
+                autocompleted = format!("{}{}", last_good, matches[0]);
+            } else {
+                autocompleted = format!("{}/{}", last_good, matches[0]);
+            }
+
+            // Now check to see if the path is a dir. If it is, and if it doesn't already,
+            // end it with a /.
+            let path = Path::new(&autocompleted);
+            if path.exists() {
+                if path.metadata().unwrap().is_dir() && !autocompleted.ends_with("/") {
+                    autocompleted = format!("{}/", autocompleted);
+                }
+            }
+
+            // Finally, this is over.
+            autocompleted = linuxize_path(autocompleted);
+            self.command = format!("{} {}", command, autocompleted);
+            self.cursor_pos = self.command.chars().count();
+            self.render();
+        }
+    }
+    // Suffering has ended. Please resume normal activity.
+
+
+    // Handle all other char input
+    fn handle_char_input(&mut self, c: char) {
+        let (s1, s2) = self.command.split_at(self.cursor_pos);
+        self.command = format!("{}{}{}", s1, c, s2);
+        self.cursor_pos += 1;
+        let hislen = self.history.len();
+        self.history[hislen-1] = self.command.clone();
+        self.render();
+    }
+
+
+    // Push new string to history, thereby effectively committing the last one.
+    // This is a separate function because we don't always necessarily want to
+    // do this, and sometimes the deciding factor will be outside of the Console
+    // object. (I.E. an invalid command)
+    fn history_push(&mut self) {
+        self.history.push(String::new());
+        self.history_pos += 1;
+    }
+
+
+    // Where it all comes together!
+    // Keystroke events are read in here.
+    fn await_command(&mut self) -> String {
+        print!("{}", self.get_prompt());
+        self.stdout.flush();
+        self.command = String::new();
+        self.cursor_pos = 0;
+        while let Event::Key(KeyEvent{code, ..}) = event::read().unwrap() {
+            match code {
+
+                KeyCode::Backspace => {
+                    self.handle_backspace();
+                }
+
+                KeyCode:: Tab=> {
+                    self.handle_tab();
+                }
+
+                KeyCode::Up => {
+                    self.handle_up();
+                }
+
+                KeyCode::Down => {
+                    self.handle_down();
+                }
+
+                KeyCode::Left => {
+                    self.handle_left();
+                }
+
+                KeyCode::Right => {
+                    self.handle_right();
+                }
+
+                KeyCode::Enter => {
+                    break;
+                }
+
+                KeyCode::Char(c) => {
+                    self.handle_char_input(c);
+                }
+
+                _ => {}
+
+            }
+        }
+        print!("\n");
+        return self.command.clone();
+    }
+}
+
+
+// ls directories
+fn ls(directory: String, console: &Console) {
+    let width = console.term_width();
+    let dir = directory.replace("~", &home_as_string());
+    let path = Path::new(&dir);
+
+    let files = match path.read_dir() {
         Ok(files) => files,
         Err(error) => return println!("Could not read directory: {:?}", error),
     };
@@ -69,24 +396,30 @@ fn ls(args: Vec<&str>) {
     let mut charcount = 0;
     let mut perfect = true;
 
+    // This doesn't need to be mut, but it is because it eventually will need to be.
+    let mut list_hidden = false;
+
     for file in files {
         if let Ok(file) = file {
             let filename = file.file_name().into_string().unwrap();
             let meta = file.metadata().unwrap();
+            let attr = meta.file_attributes();
             let mut output = String::new();
 
-            if (charcount + &filename.chars().count()) > term_width {
+            if (charcount + &filename.chars().count()) > width {
                 output = format!("\n\n{}   ", &filename);
                 charcount = filename.chars().count() + 3;
-            } else if (charcount + &filename.chars().count()) == term_width {
+            } else if (charcount + &filename.chars().count()) == width {
                 output = format!("{}\n\n", &filename);
                 charcount = 0;
             } else {
                 output = format!("{}   ", &filename);
-                charcount = charcount + filename.chars().count() + 3;
+                charcount += filename.chars().count() + 3;
             }
 
-            if meta.is_dir() {
+            if (attr == 2 || filename.starts_with(".")) && !list_hidden {
+                continue;
+            } else if meta.is_dir() {
                 print!("{}", output.bright_blue());
             } else if filename.ends_with(".lnk") {
                 print!("{}", output.bright_cyan());
@@ -97,6 +430,7 @@ fn ls(args: Vec<&str>) {
             perfect = false;
         }
     }
+
     if perfect {
         println!("");
     } else {
@@ -104,231 +438,70 @@ fn ls(args: Vec<&str>) {
     }
 }
 
-// obtain user@host:~$ or whatever it should be
-fn get_prompt() -> String {
-    let user = env::var("USERNAME").unwrap().to_lowercase();
-    let host = env::var("COMPUTERNAME").unwrap().to_lowercase();
 
-    let mut output = user + "@" + &host;
-    output = output.bright_green().to_string();
+// Change directories
+fn cd(directory: String) {
+    let dir = directory.replace("~", &home_as_string());
+    let path = Path::new(&dir);
 
-    let home_abs = env::current_dir().unwrap().canonicalize().unwrap();
-    let mut cwd = home_abs.into_os_string().into_string().unwrap();
-
-    let home_rel_str = env::var("HOMEPATH").unwrap();
-    let home_rel = Path::new(&home_rel_str);
-    let home_abs = home_rel.canonicalize().unwrap();
-    let home = home_abs.into_os_string().into_string().unwrap();
-
-    if cwd.starts_with(&home) {
-        cwd = cwd.replace(&home, "~");
-    } else {
-        cwd = env::current_dir().unwrap().into_os_string().into_string().unwrap();
-    }
-    cwd = cwd.replace("\\", "/");
-
-    return format!("{}:{}{} ", output.bold(), cwd.bright_blue().bold(), "$".normal().clear());
+    let result = env::set_current_dir(&path);
+    match result {
+        Ok(output) => output,
+        Err(error) => match error.kind() {
+            ErrorKind::NotFound => {
+                println!("Could not cd into \"{}\": Directory not found.", path.display());
+            },
+            ErrorKind::PermissionDenied => {
+                println!("Could not cd into \"{}\": Access is denied.", path.display());
+            }
+            other => {
+                println!("Could not cd into \"{}\": {:?}", path.display(), other);
+            }
+        }
+    };
 }
 
 
-// Oh, here comes the HITLER.
+// main
 fn main() {
-    // Clear out screen
-    clear();
+    // OOP (kinda anyway)
+    let mut console = Console::new();
+    console.clear();
 
-    // Set up history variables.
-    let mut history = vec![String::new()];
-    let mut history_pos = 0;
-
-    // Drop into infinte loop
     loop {
-        // prompt stores the user@host:~$ for the current command
-        let prompt = get_prompt();
+        // This amounts to a really fancy read_line()
+        let command = console.await_command();
 
-        // line stores the current prompt with the command being entered
-        let mut line = prompt.clone();
+        // Separate command from args
+        let args;
+        if command.contains(" ") {
+            let fsi = command.chars().position(|c| c == ' ').unwrap();
+            let (_command, a) = command.split_at(fsi);
+            args = a.trim_start();
+        } else {
+            args = "";
+        }
 
-        // min_pos stores the minimum position in the string.
-        // (to prevent the user from editing the prompt)
-        let min_pos = line.chars().count();
-
-        // pos stores the current position in the command string
-        let mut pos = min_pos;
-        let mut stdout = stdout();
-
-        // print out prompt
-        print!("{}", line);
-        stdout.flush();
-
-        // then wait for keypress event
-        while let Event::Key(KeyEvent { code, ..}) = event::read().unwrap() {
-            match code {
-
-                KeyCode::Backspace => {
-                    // If the cursor is at the right end of the
-                    // prompt, they can't go any further so BEEP.
-                    if pos <= min_pos {
-                        print!("{}", Beep);
-
-                    // Otherwise, facilitate backspace behavior.
-                    // Don't ask me, iunno how this works.
-                    } else {
-                        let (f, last) = line.split_at(pos);
-                        let mut first = String::from(f);
-                        first.pop();
-                        line = format!("{}{}", first, last);
-                        pos = pos - 1;
-                        let back = (line.chars().count() - pos) as u16;
-                        print!("{}{}{}", EraseLine, CursorLeft, line);
-                        if back > 0 { print!("{}", CursorBackward(back)); }
-                        let command = line.replace(&prompt, "");
-                        let l = history.len();
-                        history[l-1] = command;
-                        if history[l-1] == "" { history.pop(); }
-                    }
-                }
-
-                KeyCode::Left => {
-                    // If at the end of the prompt, BEEP
-                    if pos <= min_pos {
-                        print!("{}", Beep);
-                    // Otherwise move cursor backwards.
-                    } else {
-                        print!("{}", CursorBackward(1));
-                        pos = pos - 1;
-                    }
-                }
-
-                KeyCode::Right => {
-                    // If at end of the command, BEEP
-                    if pos >= line.chars().count() {
-                        print!("{}", Beep);
-                    // Otherwise move cursor forward.
-                    } else {
-                        print!("{}", CursorForward(1));
-                        pos = pos + 1;
-                    }
-                }
-
-                // If enter is pressed, the command is complete,
-                // and we should break out of the loop to process it.
-                KeyCode::Enter => {
-                    break;
-                }
-
-                KeyCode::Up => {
-                    // Facilitate history recall behavior, but ONLY if there's
-                    // history available.
-                    if history_pos > 0 {
-                        history_pos = history_pos - 1;
-                        line = format!("{}{}", prompt, history[history_pos]);
-                        pos = line.chars().count();
-                        print!("{}{}{}", EraseLine, CursorLeft, line);
-                    }
-                }
-
-                // Same here, but backwards.
-                KeyCode::Down => {
-                    if history_pos < (history.len() - 1) {
-                        history_pos = history_pos + 1;
-                        line = format!("{}{}", prompt, history[history_pos]);
-                        pos = line.chars().count();
-                        print!("{}{}{}", EraseLine, CursorLeft, line);
-                    }
-                }
-
-                // Ugh, and then there's THIS piece of shit.
-                KeyCode::Tab => {
-                    // So here we set some variables and...
-                    let command_str = line.replace(&prompt, "");
-                    let mut command: Vec<&str> = command_str.split(" ").collect();
-                    let last = command[command.len()-1];
-                    let cwd = env::current_dir().unwrap();
-                    let files = cwd.read_dir().unwrap();
-                    let mut matches: Vec<String> = Vec::new();
-
-                    // Imma be honest, I don't even remember how I made this work.
-                    // So have fun.
-
-                    for file in files {
-                        let file_ref = file.as_ref();
-                        let filename = file_ref.unwrap().file_name().to_os_string().into_string().unwrap();
-                        if filename.starts_with(last) {
-                            matches.push(filename);
-                        }
-                    }
-
-                    if matches.len() == 0 {
-                        print!("{}", Beep);
-                    } else if matches.len() == 1 {
-                        let l = command.len();
-                        command[l-1] = &matches[0];
-                        let out = command.join(" ");
-                        line = format!("{}{}", prompt, out);
-                        pos = line.chars().count();
-                        print!("{}{}{}", EraseLine, CursorLeft, line);
-                    } else {
-                        print!("\n");
-                        for file in matches {
-                            print!("{}   ", file);
-                            print!("\n{}", Beep);
-                        }
-                    }
-                }
-
-                KeyCode::Char(c) => {
-                    // Handles all other keystrokes basically.
-                    let (first, last) = line.split_at(pos);
-                    line = format!("{}{}{}", first, c, last);
-                    pos = pos + 1;
-                    let back = (line.chars().count() - pos) as u16;
-                    print!("{}{}{}", EraseLine, CursorLeft, line);
-                    if back > 0 { print!("{}", CursorBackward(back)); }
-                    let command = line.replace(&prompt, "");
-                    let l = history.len();
-                    history[l-1] = command;
-                }
-                _ => {}
+        // Process commands
+        if command.starts_with("ls") {
+            if command == "ls" {
+                ls(cwd_as_string(), &console);
+            } else {
+                ls(args.to_string(), &console);
             }
-            stdout.flush();
-        }
-
-        // Move down a line. There. I remember what THIS one does.
-        print!("\n");
-
-        // Extract command from the full prompt since I didn't think to keep 'em separate.
-        let command = line.replace(&prompt, "");
-
-        // If the command isn't empty, push a new String into the history.
-        // The reason for this is the last element in the history is the current command.
-        // If the command was successful, we want a new empty string to edit as the command
-        // is entered.
-        if command != "" {
-            history.push(String::new());
-            history_pos = history_pos + 1;
-        }
-
-        // Finally, we process commands here.
-        // If exit, break out of the outer loop and that's all folks!
-        if command == "exit" {
-            println!("Bye!");
-            break;
-        // If the command is cd...do cd.
-        } else if command.starts_with("cd ") {
-            cd(command.split(" ").collect());
-        // If it's ls, then do ls.
-        } else if command.starts_with("ls ") || command == "ls" {
-            ls(command.split(" ").collect());
-            stdout.flush();
-        // You get the point.
         } else if command == "clear" || command == "cls" {
-            clear();
-        // If it's none of the above, assume it's a native Windows command.
+            console.clear();
+        } else if command.starts_with("cd ") {
+            cd(args.to_string());
+        } else if command == "exit" {
+            break;
         } else {
             let mut args: Vec<&str> = command.split(" ").collect();
             let command_sans_args = args[0];
             args.drain(0..1);
-            Command::new(command_sans_args).args(args).status().expect("Failed to execute.");
+            Command::new(command_sans_args).args(args).status();
         }
+        console.history_push();
     }
+    println!("Bye!");
 }

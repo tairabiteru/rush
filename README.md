@@ -5,7 +5,7 @@ You've been warned!
 # Wots all this then?
 This project was born out of my frustration with the Windows command line.
 * Autocomplete sucks in it.
-* Every time I type `ls` and get `'ls' is not recognized as an internal or external command...` it makes me want to die inside.
+* Every time I type `ls` and get `'ls' iS nOt ReCoGnIzEd As An InTeRnAl Or ExTeRnAl CoMmAnD...` it makes me want to die inside.
 * Oh? Make an alias of `dir`? Yeah, also the `dir` command's output is ugly anyway.
 * Typing `cd %HOMEPATH%` is an absolute mouthful.
 * No autocompletion of subdirectories in `cd`.
@@ -14,6 +14,10 @@ This project was born out of my frustration with the Windows command line.
 Also I want to learn Rust. I learn by doing, not by watching someone else. So I've got two problems to solve here...might as well kill two birds with one stone. Hence, this program.
 
 # Questions that have not been frequently asked, but that people will probably ask anyway.
+* Why not use Powershell?
+    * EW, GROSS!
+* It's better than cmd...
+    * THAT'S GROSS TOO!
 * What about the Ubuntu Subsystem for Windows?
     * Yeah, it's pretty cool, but often times I want to be able to access my stuff from the command line *outside* of the closed off subsystem environment.
 * What about cygwin?
